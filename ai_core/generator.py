@@ -159,30 +159,126 @@ def format_pdf(text: str, doc_type: str) -> bytes:
         if re.match(r"^(ARTICLE|SECTION|CLAUSE)\s+\d+", line, re.I):
             pdf.set_font("Helvetica", "B", 11)
             pdf.multi_cell(0, 7, line)
+
         elif line.startswith(("-", "*", "•")):
             pdf.set_font("Helvetica", "", 11)
             pdf.multi_cell(0, 6, "- " + line.lstrip("-*• ").strip())
+
         else:
             pdf.set_font("Helvetica", "", 11)
             pdf.multi_cell(0, 6, line)
+
         pdf.ln(1)
 
-    out = pdf.output(dest="S")
-    if hasattr(out, "encode"):
+    # fpdf handles output via dest='S' for string/bytes or direct output in fpdf2
+    try:
+        out = pdf.output(dest="S")
+    except (TypeError, ValueError):
+        out = pdf.output()
+
+    if isinstance(out, bytes):
+        return out
+
+    if isinstance(out, bytearray):
+        return bytes(out)
+
+    if isinstance(out, str):
         return out.encode("latin-1", "replace")
+
     return bytes(out)
-
-
 def format_html_preview(text: str) -> str:
     """Convert generated output to styled HTML blocks for Streamlit preview."""
     blocks = []
-    for line in _split_document(text):
+    lines = _split_document(text)
+    
+    for line in lines:
         safe = html.escape(line)
-        if re.match(r"^(ARTICLE|SECTION|CLAUSE)\s+\d+", line, re.I):
-            blocks.append(f'<h3>{safe}</h3>')
+        upper = line.upper()
+        
+        # Match Article, Section, Clause, or ALL CAPS headers
+        if re.match(r"^(ARTICLE|SECTION|CLAUSE)\s+\d+", line, re.I) or (len(line) < 60 and line.isupper() and not line.endswith(".")):
+            blocks.append(f'<div class="doc-section-header"><span class="header-icon">§</span> {safe}</div>')
         elif line.startswith(("-", "*", "•")):
-            blocks.append(f'<div class="term">• {html.escape(line.lstrip("-*• ").strip())}</div>')
+            term_content = html.escape(line.lstrip("-*• ").strip())
+            blocks.append(f'<div class="doc-bullet-item"><span class="bullet-dot">•</span> {term_content}</div>')
+        elif re.match(r"^\d+[.)]\s+", line):
+            blocks.append(f'<div class="doc-numbered-item">{safe}</div>')
+        elif "IN WITNESS WHEREOF" in upper or "EXECUTED AS OF" in upper:
+            blocks.append(f'<div class="doc-witness-block">{safe}</div>')
         else:
-            blocks.append(f"<p>{safe}</p>")
+            # Highlight dates or party terms if present
+            safe_highlighted = re.sub(
+                r'(\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b)',
+                r'<span class="doc-date-highlight">\1</span>',
+                safe,
+                flags=re.IGNORECASE
+            )
+            blocks.append(f'<p class="doc-paragraph">{safe_highlighted}</p>')
 
     return "\n".join(blocks)
+
+
+def analyze_legal_document(text: str) -> dict:
+    """Analyze document structure and extract risk assessment & key clauses."""
+    upper = text.upper()
+    
+    clauses = [
+        {
+            "name": "Confidentiality & Non-Disclosure",
+            "detected": any(k in upper for k in ["CONFIDENTIAL", "NON-DISCLOSURE", "PROPRIETARY INFORMATION"]),
+            "icon": "🔒",
+            "importance": "High",
+            "summary": "Protects trade secrets and proprietary data."
+        },
+        {
+            "name": "Termination & Notice",
+            "detected": any(k in upper for k in ["TERMINATION", "TERMINATE", "NOTICE PERIOD", "EXPIRATION"]),
+            "icon": "🚪",
+            "importance": "High",
+            "summary": "Defines rules and timeframe for ending the agreement."
+        },
+        {
+            "name": "Governing Law & Jurisdiction",
+            "detected": any(k in upper for k in ["GOVERNING LAW", "JURISDICTION", "LAWS OF", "COURTS OF"]),
+            "icon": "⚖️",
+            "importance": "Critical",
+            "summary": "Specifies legal jurisdiction and enforcement court."
+        },
+        {
+            "name": "Payment & Compensation",
+            "detected": any(k in upper for k in ["PAYMENT", "COMPENSATION", "FEES", "INVOICE", "CONSIDERATION"]),
+            "icon": "💰",
+            "importance": "High",
+            "summary": "Outlines financial obligations and schedules."
+        },
+        {
+            "name": "Intellectual Property Ownership",
+            "detected": any(k in upper for k in ["INTELLECTUAL PROPERTY", "WORK MADE FOR HIRE", "COPYRIGHT", "OWNERSHIP"]),
+            "icon": "💡",
+            "importance": "Medium",
+            "summary": "Clarifies rights to created assets and IP."
+        },
+        {
+            "name": "Limitation of Liability & Indemnity",
+            "detected": any(k in upper for k in ["INDEMNIF", "LIMITATION OF LIABILITY", "HOLD HARMLESS", "DAMAGES"]),
+            "icon": "🛡️",
+            "importance": "High",
+            "summary": "Shields parties against catastrophic legal liabilities."
+        }
+    ]
+    
+    detected_count = sum(1 for c in clauses if c["detected"])
+    total_count = len(clauses)
+    compliance_score = int((detected_count / total_count) * 100)
+    
+    words = len(text.split())
+    read_time_min = max(1, round(words / 200, 1))
+    
+    return {
+        "word_count": words,
+        "character_count": len(text),
+        "read_time_min": read_time_min,
+        "compliance_score": compliance_score,
+        "clauses": clauses
+    }
+
